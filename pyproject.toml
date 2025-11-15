@@ -1,0 +1,57 @@
+[project]
+name = "chanel"
+version = "0.1.0"
+description = "High-performance Cython library for modeling stock candle geometry and detecting support/resistance levels and fair-value gaps"
+authors = [{name = "Your Name", email = "your.email@example.com"}]
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.24.0",
+    "pandas>=2.0.0",
+    "cython>=3.0.0",
+    "matplotlib>=3.9.4",
+    "ipykernel>=6.31.0",
+    "setuptools>=80.9.0",
+    "wheel>=0.45.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "hypothesis>=6.82.0",
+    "black>=23.7.0",
+    "mypy>=1.4.0",
+    "ipython>=8.14.0",
+    "jupyter>=1.0.0",
+]
+viz = [
+    "matplotlib>=3.7.0",
+    "plotly>=5.15.0",
+]
+
+[build-system]
+requires = ["setuptools>=64", "wheel", "Cython>=3.0.0", "numpy>=1.24.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["chanel"]
+
+[tool.black]
+line-length = 100
+target-version = ['py39']
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --cov=chanel --cov-report=term-missing"
+
