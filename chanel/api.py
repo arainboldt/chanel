@@ -6,7 +6,7 @@ This module provides the main CandleAnalyzer class that users interact with.
 
 import pandas as pd
 import numpy as np
-from typing import List, Dict, Optional, Union
+from typing import List, Dict, Optional, Union, Tuple
 from pathlib import Path
 
 
@@ -56,6 +56,7 @@ class CandleAnalyzer:
         # Cache for detected patterns
         self._sr_cache: Dict[str, pd.DataFrame] = {}
         self._fvg_cache: Dict[str, pd.DataFrame] = {}
+        self._boundary_cache: Dict[str, pd.DataFrame] = {}
     
     @classmethod
     def from_dataframe(cls, df: pd.DataFrame, source_timeframe: str = '1min') -> 'CandleAnalyzer':
@@ -293,6 +294,180 @@ class CandleAnalyzer:
         # Sort by strength
         if len(result) > 0 and 'strength' in result.columns:
             result = result.sort_values('strength', ascending=False)
+        
+        return result
+    
+    def detect_boundary_levels(
+        self,
+        timeframes: Optional[List[str]] = None,
+        swing_window: int = 10,
+        epsilon: float = 0.0001,
+        min_points: int = 2,
+        tolerance: float = 0.002,
+        min_touches: int = 2,
+        min_r_squared: float = 0.8,
+        **kwargs
+    ) -> pd.DataFrame:
+        """
+        Detect boundary levels (upper and lower boundary lines).
+        
+        Boundary levels represent the upper and lower boundary lines that exist
+        at a given point in time, detected using a greedy algorithm that groups
+        swing points with similar slopes.
+        
+        Args:
+            timeframes: List of timeframes to analyze (default: source timeframe only)
+            swing_window: Window size for swing point detection
+            epsilon: Slope difference threshold for grouping boundary lines (default: 0.0001)
+            min_points: Minimum number of points required for a valid boundary line (default: 2)
+            tolerance: Price tolerance for touches (as fraction)
+            min_touches: Minimum number of touches required for a valid boundary line
+            min_r_squared: Minimum R² for diagonal boundary lines (default: 0.8)
+            **kwargs: Additional parameters
+        
+        Returns:
+            DataFrame of detected boundary levels with columns:
+                - slope: Line slope
+                - intercept: Line intercept
+                - start_idx: Starting candle index
+                - end_idx: Ending candle index
+                - start_price: Price at start_idx
+                - end_price: Price at end_idx
+                - sr_type: 0=support, 1=resistance
+                - r_squared: R² value for the fit
+                - num_points: Number of swing points in this line
+                - touch_count: Number of touches
+                - timeframe: Timeframe where detected
+        """
+        from chanel.detectors.base import find_swing_points
+        from chanel.detectors.boundary_lines import find_boundary_lines, find_touches_for_boundary_line
+        
+        if timeframes is None:
+            timeframes = [self.source_timeframe]
+        
+        # Detection parameters
+        params = {
+            'swing_window': swing_window,
+            'epsilon': epsilon,
+            'min_points': min_points,
+            'tolerance': tolerance,
+            'min_touches': min_touches,
+            'min_r_squared': min_r_squared,
+            **kwargs
+        }
+        
+        all_boundaries = []
+        
+        for tf in timeframes:
+            # Check cache
+            cache_key = f"boundary_{tf}_{hash(frozenset(params.items()))}"
+            if cache_key in self._boundary_cache:
+                boundaries_df = self._boundary_cache[cache_key]
+            else:
+                # Resample if needed
+                candles = self.resample(tf) if tf != self.source_timeframe else self.candles
+                
+                # Find swing points
+                swing_points = find_swing_points(candles, swing_window)
+                
+                if len(swing_points) < min_points:
+                    boundaries_df = pd.DataFrame()
+                else:
+                    # Separate swing highs and lows
+                    swing_highs = [sp for sp in swing_points if sp['swing_type'] == 1]
+                    swing_lows = [sp for sp in swing_points if sp['swing_type'] == 0]
+                    
+                    boundary_lines = []
+                    
+                    # Find resistance boundary lines from swing highs
+                    if len(swing_highs) >= min_points:
+                        resistance_lines = find_boundary_lines(
+                            swing_highs,
+                            epsilon=epsilon,
+                            min_points=min_points
+                        )
+                        for line in resistance_lines:
+                            # Find touches
+                            touches = find_touches_for_boundary_line(
+                                candles,
+                                line['slope'],
+                                line['intercept'],
+                                line['start_idx'],
+                                line['end_idx'],
+                                tolerance
+                            )
+                            
+                            # Filter by min_touches
+                            if len(touches) < min_touches:
+                                continue
+                            
+                            # Filter by R² if diagonal
+                            if abs(line['slope']) > 1e-10:  # Diagonal line
+                                if line['r_squared'] < min_r_squared:
+                                    continue
+                            
+                            # Add touch_count and timeframe
+                            line['touch_count'] = len(touches)
+                            line['timeframe'] = tf
+                            boundary_lines.append(line)
+                    
+                    # Find support boundary lines from swing lows
+                    if len(swing_lows) >= min_points:
+                        support_lines = find_boundary_lines(
+                            swing_lows,
+                            epsilon=epsilon,
+                            min_points=min_points
+                        )
+                        for line in support_lines:
+                            # Find touches
+                            touches = find_touches_for_boundary_line(
+                                candles,
+                                line['slope'],
+                                line['intercept'],
+                                line['start_idx'],
+                                line['end_idx'],
+                                tolerance
+                            )
+                            
+                            # Filter by min_touches
+                            if len(touches) < min_touches:
+                                continue
+                            
+                            # Filter by R² if diagonal
+                            if abs(line['slope']) > 1e-10:  # Diagonal line
+                                if line['r_squared'] < min_r_squared:
+                                    continue
+                            
+                            # Add touch_count and timeframe
+                            line['touch_count'] = len(touches)
+                            line['timeframe'] = tf
+                            boundary_lines.append(line)
+                    
+                    # Convert to DataFrame
+                    if len(boundary_lines) > 0:
+                        boundaries_df = pd.DataFrame(boundary_lines)
+                    else:
+                        boundaries_df = pd.DataFrame(columns=[
+                            'slope', 'intercept', 'start_idx', 'end_idx',
+                            'start_price', 'end_price', 'swing_points',
+                            'r_squared', 'sr_type', 'num_points',
+                            'touch_count', 'timeframe'
+                        ])
+                
+                # Cache results
+                self._boundary_cache[cache_key] = boundaries_df
+            
+            all_boundaries.append(boundaries_df)
+        
+        # Combine results
+        if not all_boundaries:
+            return pd.DataFrame()
+        
+        result = pd.concat(all_boundaries, ignore_index=True)
+        
+        # Sort by start_idx (chronological order)
+        if len(result) > 0 and 'start_idx' in result.columns:
+            result = result.sort_values('start_idx')
         
         return result
     
@@ -535,4 +710,513 @@ class CandleAnalyzer:
         
         candles = self.resample(timeframe)
         return candles.to_dataframe()
+    
+    def extract_features(
+        self,
+        frequency: str,
+        timeframe_hierarchy: Optional[List[str]] = None,
+        **detection_params
+    ) -> pd.DataFrame:
+        """
+        Extract features for each timestep at a given frequency.
+        
+        Features include:
+        - Next 2 support/resistance levels above and below current price
+        - All boundaries at all hierarchy levels (>= frequency)
+        - Next 2 fair value gaps above and below at each hierarchy level
+        
+        Args:
+            frequency: Base frequency for timesteps (e.g., '1min', '5min')
+            timeframe_hierarchy: List of timeframes in hierarchy (default: from config)
+            **detection_params: Parameters for S/R, boundary, and FVG detection
+        
+        Returns:
+            DataFrame with one row per timestep and feature columns
+        """
+        from chanel.config import get_default_config
+        from chanel.timeframes.resampler import get_timeframe_seconds
+        
+        # Get timeframe hierarchy
+        if timeframe_hierarchy is None:
+            config = get_default_config()
+            timeframe_hierarchy = config.timeframe_hierarchy
+        
+        # Get relevant timeframes (all >= frequency)
+        relevant_timeframes = self._get_relevant_timeframes(frequency, timeframe_hierarchy)
+        
+        # Get base candles for the frequency
+        base_candles = self.resample(frequency) if frequency != self.source_timeframe else self.candles
+        base_df = base_candles.to_dataframe()
+        
+        # Detect all patterns once
+        sr_levels = self.detect_support_resistance(
+            timeframes=relevant_timeframes,
+            **{k: v for k, v in detection_params.items() if k not in ['min_gap_size', 'min_gap_size_atr', 'max_middle_candles', 'track_fills']}
+        )
+        
+        boundary_levels = self.detect_boundary_levels(
+            timeframes=relevant_timeframes,
+            **{k: v for k, v in detection_params.items() if k not in ['min_gap_size', 'min_gap_size_atr', 'max_middle_candles', 'track_fills']}
+        )
+        
+        fvgs = self.detect_fair_value_gaps(
+            timeframes=relevant_timeframes,
+            **{k: v for k, v in detection_params.items() if k not in ['swing_window', 'epsilon', 'min_points', 'min_r_squared']}
+        )
+        
+        # Initialize feature DataFrame
+        features = base_df[['timestamp', 'close']].copy()
+        features.rename(columns={'close': 'close_price'}, inplace=True)
+        
+        # Extract features for each timestep
+        for idx in range(len(base_df)):
+            current_price = base_df['close'].iloc[idx]
+            current_idx = idx
+            
+            # Extract S/R features (next 2 above and below)
+            sr_features = self._extract_sr_features(
+                sr_levels, current_price, current_idx, frequency
+            )
+            for key, value in sr_features.items():
+                features.loc[idx, key] = value
+            
+            # Extract boundary features for each timeframe
+            for tf in relevant_timeframes:
+                boundary_features = self._extract_boundary_features(
+                    boundary_levels, current_price, current_idx, tf, frequency
+                )
+                for key, value in boundary_features.items():
+                    features.loc[idx, key] = value
+            
+            # Extract FVG features for each timeframe
+            for tf in relevant_timeframes:
+                fvg_features = self._extract_fvg_features(
+                    fvgs, current_price, current_idx, tf, frequency
+                )
+                for key, value in fvg_features.items():
+                    features.loc[idx, key] = value
+        
+        return features
+    
+    def _get_relevant_timeframes(self, frequency: str, timeframe_hierarchy: List[str]) -> List[str]:
+        """Get all timeframes >= the given frequency."""
+        from chanel.timeframes.resampler import get_timeframe_seconds
+        
+        freq_seconds = get_timeframe_seconds(frequency)
+        relevant = []
+        
+        for tf in timeframe_hierarchy:
+            try:
+                tf_seconds = get_timeframe_seconds(tf)
+                if tf_seconds >= freq_seconds:
+                    relevant.append(tf)
+            except ValueError:
+                # Skip unknown timeframes
+                continue
+        
+        return relevant
+    
+    def _calculate_level_price_at_index(self, level: pd.Series, index: int) -> float:
+        """Calculate the price of a level (horizontal or diagonal) at a given index."""
+        level_type = level.get('level_type', 0)
+        
+        if level_type == 0:  # Horizontal
+            return level['price']
+        else:  # Diagonal
+            slope = level.get('slope', 0.0)
+            intercept = level.get('intercept', 0.0)
+            return slope * index + intercept
+    
+    def _is_level_valid_at_index(self, level: pd.Series, index: int) -> bool:
+        """Check if a level is valid at a given index."""
+        start_idx = level.get('start_idx', 0)
+        end_idx = level.get('end_idx', -1)
+        
+        if index < start_idx:
+            return False
+        if end_idx >= 0 and index > end_idx:
+            return False
+        return True
+    
+    def _extract_sr_features(
+        self,
+        sr_levels: pd.DataFrame,
+        current_price: float,
+        current_idx: int,
+        frequency: str
+    ) -> Dict[str, float]:
+        """Extract next 2 S/R levels above and below current price."""
+        features = {
+            'sr_above_0_dist': np.nan,
+            'sr_above_1_dist': np.nan,
+            'sr_below_0_dist': np.nan,
+            'sr_below_1_dist': np.nan,
+        }
+        
+        if len(sr_levels) == 0:
+            return features
+        
+        # Get base candles for mapping
+        freq_candles = self.resample(frequency) if frequency != self.source_timeframe else self.candles
+        current_timestamp = freq_candles.get_timestamp(current_idx)
+        
+        # Filter levels valid at current index (need to map to each timeframe)
+        valid_levels = []
+        for _, level in sr_levels.iterrows():
+            level_timeframe = level.get('timeframe', frequency)
+            
+            # Map current index to level's timeframe
+            if level_timeframe == frequency:
+                level_idx = current_idx
+            else:
+                tf_candles = self.resample(level_timeframe) if level_timeframe != self.source_timeframe else self.candles
+                level_idx = self._find_index_by_timestamp(tf_candles, current_timestamp)
+                if level_idx < 0:
+                    continue
+            
+            if self._is_level_valid_at_index(level, level_idx):
+                level_price = self._calculate_level_price_at_index(level, level_idx)
+                distance = level_price - current_price
+                valid_levels.append({
+                    'distance': distance,
+                    'level': level
+                })
+        
+        if len(valid_levels) == 0:
+            return features
+        
+        # Separate above and below
+        above = [v for v in valid_levels if v['distance'] > 0]
+        below = [v for v in valid_levels if v['distance'] < 0]
+        
+        # Sort by absolute distance (closest first)
+        above.sort(key=lambda x: x['distance'])
+        below.sort(key=lambda x: -x['distance'])  # Negative to get closest below
+        
+        # Extract next 2 above
+        for i, level_data in enumerate(above[:2]):
+            features[f'sr_above_{i}_dist'] = level_data['distance']
+        
+        # Extract next 2 below
+        for i, level_data in enumerate(below[:2]):
+            features[f'sr_below_{i}_dist'] = level_data['distance']
+        
+        return features
+    
+    def _extract_boundary_features(
+        self,
+        boundary_levels: pd.DataFrame,
+        current_price: float,
+        current_idx: int,
+        timeframe: str,
+        frequency: str
+    ) -> Dict[str, float]:
+        """Extract all boundaries for a specific timeframe."""
+        features = {}
+        
+        # Filter boundaries for this timeframe
+        tf_boundaries = boundary_levels[boundary_levels['timeframe'] == timeframe] if len(boundary_levels) > 0 else pd.DataFrame()
+        
+        if len(tf_boundaries) == 0:
+            return features
+        
+        # Get candles for this timeframe to map indices
+        tf_candles = self.resample(timeframe) if timeframe != self.source_timeframe else self.candles
+        freq_candles = self.resample(frequency) if frequency != self.source_timeframe else self.candles
+        
+        # Map current index to timeframe index
+        current_timestamp = freq_candles.get_timestamp(current_idx)
+        tf_idx = self._find_index_by_timestamp(tf_candles, current_timestamp)
+        
+        if tf_idx < 0:
+            return features
+        
+        # Process each boundary
+        boundary_counter = 0
+        for idx, boundary in tf_boundaries.iterrows():
+            if not self._is_level_valid_at_index(boundary, tf_idx):
+                continue
+            
+            boundary_price = self._calculate_level_price_at_index(boundary, tf_idx)
+            distance = boundary_price - current_price
+            
+            sr_type = 'support' if boundary['sr_type'] == 0 else 'resistance'
+            feature_key = f'boundary_{timeframe}_{sr_type}_{boundary_counter}_dist'
+            features[feature_key] = distance
+            boundary_counter += 1
+        
+        return features
+    
+    def _extract_fvg_features(
+        self,
+        fvgs: pd.DataFrame,
+        current_price: float,
+        current_idx: int,
+        timeframe: str,
+        frequency: str
+    ) -> Dict[str, float]:
+        """Extract next 2 FVGs above and below for a specific timeframe."""
+        features = {}
+        
+        # Filter FVGs for this timeframe and unfilled/partially filled
+        tf_fvgs = fvgs[
+            (fvgs['timeframe'] == timeframe) & 
+            (fvgs['filled'] < 2)  # 0=unfilled, 1=partial, 2=full
+        ] if len(fvgs) > 0 else pd.DataFrame()
+        
+        if len(tf_fvgs) == 0:
+            return features
+        
+        # Get candles for mapping indices
+        tf_candles = self.resample(timeframe) if timeframe != self.source_timeframe else self.candles
+        freq_candles = self.resample(frequency) if frequency != self.source_timeframe else self.candles
+        
+        # Map current index to timeframe index
+        current_timestamp = freq_candles.get_timestamp(current_idx)
+        tf_idx = self._find_index_by_timestamp(tf_candles, current_timestamp)
+        
+        if tf_idx < 0:
+            return features
+        
+        # Filter FVGs that start before or at current index
+        valid_fvgs = []
+        for _, fvg in tf_fvgs.iterrows():
+            if fvg['start_idx'] <= tf_idx:
+                gap_low = fvg['gap_low']
+                gap_high = fvg['gap_high']
+                
+                # Determine if FVG is above or below current price
+                if gap_low > current_price:
+                    # FVG is above
+                    dist_low = gap_low - current_price
+                    dist_high = gap_high - current_price
+                    valid_fvgs.append({
+                        'type': 'above',
+                        'distance_low': dist_low,
+                        'distance_high': dist_high,
+                        'direction': fvg['direction'],
+                        'strength': fvg.get('strength', 0.0),
+                        'fvg': fvg
+                    })
+                elif gap_high < current_price:
+                    # FVG is below
+                    dist_low = current_price - gap_high
+                    dist_high = current_price - gap_low
+                    valid_fvgs.append({
+                        'type': 'below',
+                        'distance_low': dist_low,
+                        'distance_high': dist_high,
+                        'direction': fvg['direction'],
+                        'strength': fvg.get('strength', 0.0),
+                        'fvg': fvg
+                    })
+        
+        # Separate above and below
+        above = [v for v in valid_fvgs if v['type'] == 'above']
+        below = [v for v in valid_fvgs if v['type'] == 'below']
+        
+        # Sort by distance_low (closest first)
+        above.sort(key=lambda x: x['distance_low'])
+        below.sort(key=lambda x: x['distance_low'])
+        
+        # Extract next 2 above
+        for i, fvg_data in enumerate(above[:2]):
+            direction_str = 'bullish' if fvg_data['direction'] == 1 else 'bearish'
+            features[f'fvg_{timeframe}_above_{i}_type'] = 1 if fvg_data['direction'] == 1 else -1
+            features[f'fvg_{timeframe}_above_{i}_strength'] = fvg_data['strength']
+            features[f'fvg_{timeframe}_above_{i}_dist_low'] = fvg_data['distance_low']
+            features[f'fvg_{timeframe}_above_{i}_dist_high'] = fvg_data['distance_high']
+        
+        # Extract next 2 below
+        for i, fvg_data in enumerate(below[:2]):
+            direction_str = 'bullish' if fvg_data['direction'] == 1 else 'bearish'
+            features[f'fvg_{timeframe}_below_{i}_type'] = 1 if fvg_data['direction'] == 1 else -1
+            features[f'fvg_{timeframe}_below_{i}_strength'] = fvg_data['strength']
+            features[f'fvg_{timeframe}_below_{i}_dist_low'] = fvg_data['distance_low']
+            features[f'fvg_{timeframe}_below_{i}_dist_high'] = fvg_data['distance_high']
+        
+        return features
+    
+    def _find_index_by_timestamp(self, candles, target_timestamp: int) -> int:
+        """Find the candle index closest to a given timestamp."""
+        # Use direct access to timestamps array for efficiency
+        if hasattr(candles, 'timestamps'):
+            timestamps = candles.timestamps
+        else:
+            # Fallback to DataFrame conversion
+            df = candles.to_dataframe()
+            if 'timestamp' not in df.columns:
+                return -1
+            timestamps = df['timestamp'].values
+        
+        if len(timestamps) == 0:
+            return -1
+        
+        # Find closest timestamp using binary search
+        idx = np.searchsorted(timestamps, target_timestamp, side='left')
+        
+        # Check if we should use idx or idx-1
+        if idx > 0 and idx < len(timestamps):
+            if abs(timestamps[idx] - target_timestamp) > abs(timestamps[idx-1] - target_timestamp):
+                idx = idx - 1
+        elif idx >= len(timestamps):
+            idx = len(timestamps) - 1
+        
+        return idx
+    
+    def get_last_timestamp(self) -> int:
+        """
+        Get timestamp of last candle in analyzer.
+        
+        Returns:
+            Timestamp of last candle (int64)
+        """
+        if len(self.df) == 0:
+            raise ValueError("No candles in analyzer")
+        return int(self.df['timestamp'].iloc[-1])
+    
+    def get_data_range(self) -> Tuple[int, int]:
+        """
+        Get (first_timestamp, last_timestamp) of current data.
+        
+        Returns:
+            Tuple of (first_timestamp, last_timestamp)
+        """
+        if len(self.df) == 0:
+            raise ValueError("No candles in analyzer")
+        return (int(self.df['timestamp'].iloc[0]), int(self.df['timestamp'].iloc[-1]))
+    
+    def export_state(self) -> pd.DataFrame:
+        """
+        Export analyzer state as a DataFrame.
+        
+        This exports the current candle data as a DataFrame that can be saved
+        to CSV, Parquet, or any other format. The state includes all candles
+        with their OHLCV data.
+        
+        Returns:
+            DataFrame with columns: timestamp, open, high, low, close, volume
+        """
+        return self.df.copy()
+    
+    @classmethod
+    def ingest_state(cls, state_df: pd.DataFrame, source_timeframe: str = '1min') -> 'CandleAnalyzer':
+        """
+        Ingest analyzer state from a DataFrame.
+        
+        Creates a new CandleAnalyzer instance from the provided DataFrame.
+        This is equivalent to using from_dataframe() but provides a consistent
+        API with export_state().
+        
+        Args:
+            state_df: DataFrame with columns: timestamp, open, high, low, close, volume
+            source_timeframe: Timeframe of the source data (default: '1min')
+            
+        Returns:
+            CandleAnalyzer instance created from the ingested state
+        """
+        return cls.from_dataframe(state_df, source_timeframe)
+    
+    def invalidate_cache(self, cache_type: Optional[str] = None, timeframes: Optional[List[str]] = None) -> None:
+        """
+        Invalidate caches.
+        
+        Args:
+            cache_type: Type of cache to invalidate ('resampled', 'sr', 'fvg', 'boundary', or None for all)
+            timeframes: List of timeframes to invalidate (only for resampled cache). If None, invalidates all.
+        """
+        if cache_type is None or cache_type == 'resampled':
+            if timeframes is None:
+                # Keep only source timeframe
+                self._resampled_cache = {self.source_timeframe: self.candles}
+            else:
+                # Remove specified timeframes
+                for tf in timeframes:
+                    if tf != self.source_timeframe:
+                        self._resampled_cache.pop(tf, None)
+        
+        if cache_type is None or cache_type == 'sr':
+            self._sr_cache.clear()
+        
+        if cache_type is None or cache_type == 'fvg':
+            self._fvg_cache.clear()
+        
+        if cache_type is None or cache_type == 'boundary':
+            self._boundary_cache.clear()
+    
+    def append_candles(self, new_candles_df: pd.DataFrame, invalidate_patterns: bool = True) -> None:
+        """
+        Append new 1-minute candles and update internal state.
+        
+        This method appends new candles to the existing data and invalidates
+        affected caches. Pattern detection should be called again after appending
+        to get updated results.
+        
+        Args:
+            new_candles_df: DataFrame with new 1-minute candles. Must have columns:
+                timestamp, open, high, low, close, volume
+            invalidate_patterns: If True, invalidate pattern caches (S/R, FVG, boundary).
+                Set to False if you want to manually manage cache invalidation.
+        
+        Raises:
+            ValueError: If new candles are not valid (wrong timeframe, out of order, etc.)
+        """
+        from chanel.core.candles import CandleArray
+        
+        # Validate required columns
+        required_cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
+        missing_cols = [col for col in required_cols if col not in new_candles_df.columns]
+        if missing_cols:
+            raise ValueError(f"New candles DataFrame missing required columns: {missing_cols}")
+        
+        # Validate that we have existing data
+        if len(self.df) == 0:
+            raise ValueError("Cannot append to empty analyzer. Use from_dataframe() instead.")
+        
+        # Validate timestamps are in order and after last candle
+        new_candles_df = new_candles_df.copy()
+        new_candles_df = new_candles_df.sort_values('timestamp')
+        
+        last_timestamp = self.get_last_timestamp()
+        first_new_timestamp = int(new_candles_df['timestamp'].iloc[0])
+        
+        if first_new_timestamp <= last_timestamp:
+            raise ValueError(
+                f"New candles must be after last existing candle. "
+                f"Last timestamp: {last_timestamp}, First new timestamp: {first_new_timestamp}"
+            )
+        
+        # Check for gaps (optional warning - we'll allow gaps but warn)
+        expected_next = last_timestamp + 60000  # 1 minute in milliseconds
+        if first_new_timestamp > expected_next + 60000:  # More than 1 minute gap
+            import warnings
+            warnings.warn(
+                f"Gap detected between candles. Last: {last_timestamp}, "
+                f"First new: {first_new_timestamp}. Gap: {(first_new_timestamp - last_timestamp) / 60000:.1f} minutes"
+            )
+        
+        # Ensure correct dtypes
+        new_candles_df['timestamp'] = new_candles_df['timestamp'].astype('int64')
+        new_candles_df['open'] = new_candles_df['open'].astype('float64')
+        new_candles_df['high'] = new_candles_df['high'].astype('float64')
+        new_candles_df['low'] = new_candles_df['low'].astype('float64')
+        new_candles_df['close'] = new_candles_df['close'].astype('float64')
+        new_candles_df['volume'] = new_candles_df['volume'].astype('float64')
+        
+        # Append to DataFrame
+        self.df = pd.concat([self.df, new_candles_df], ignore_index=True)
+        
+        # Reconstruct CandleArray from updated DataFrame
+        # This is necessary because CandleArray doesn't support appending directly
+        self.candles = CandleArray.from_dataframe(self.df)
+        
+        # Update resampled cache - keep source timeframe, invalidate others
+        self._resampled_cache = {self.source_timeframe: self.candles}
+        
+        # Invalidate pattern caches if requested
+        if invalidate_patterns:
+            self._sr_cache.clear()
+            self._fvg_cache.clear()
+            self._boundary_cache.clear()
+    
 

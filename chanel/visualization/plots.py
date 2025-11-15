@@ -285,6 +285,134 @@ def plot_fvgs_only(
     return fig
 
 
+def plot_boundary_lines(
+    candles_df: pd.DataFrame,
+    boundary_levels: pd.DataFrame,
+    figsize: Tuple[int, int] = (14, 8),
+    title: str = "Boundary Levels",
+    show_volume: bool = True,
+    style: str = 'default'
+) -> Figure:
+    """
+    Plot candlestick chart with boundary levels.
+    
+    Boundary levels are plotted separately from regular S/R levels with
+    distinct styling to show the upper and lower boundary lines.
+    
+    Args:
+        candles_df: DataFrame with OHLCV data
+        boundary_levels: DataFrame of boundary levels
+        figsize: Figure size (width, height)
+        title: Chart title
+        show_volume: Whether to show volume subplot
+        style: Plot style ('default', 'dark', 'minimal')
+    
+    Returns:
+        matplotlib Figure object
+    """
+    if style == 'dark':
+        plt.style.use('dark_background')
+    elif style == 'minimal':
+        plt.style.use('seaborn-v0_8-whitegrid')
+    
+    # Create figure
+    if show_volume:
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=figsize, 
+                                       gridspec_kw={'height_ratios': [3, 1]},
+                                       sharex=True)
+    else:
+        fig, ax1 = plt.subplots(1, 1, figsize=figsize)
+        ax2 = None
+    
+    # Plot candlesticks
+    _plot_candlesticks(ax1, candles_df)
+    
+    # Plot boundary lines
+    if boundary_levels is not None and len(boundary_levels) > 0:
+        _plot_boundary_lines(ax1, candles_df, boundary_levels)
+    
+    # Plot volume
+    if show_volume and ax2 is not None:
+        _plot_volume(ax2, candles_df)
+    
+    # Formatting
+    ax1.set_title(title, fontsize=14, fontweight='bold')
+    ax1.set_ylabel('Price', fontsize=12)
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(loc='best', fontsize=10)
+    
+    if ax2 is not None:
+        ax2.set_ylabel('Volume', fontsize=12)
+        ax2.set_xlabel('Candle Index', fontsize=12)
+        ax2.grid(True, alpha=0.3)
+    else:
+        ax1.set_xlabel('Candle Index', fontsize=12)
+    
+    plt.tight_layout()
+    
+    return fig
+
+
+def _plot_boundary_lines(ax, candles_df: pd.DataFrame, boundary_levels: pd.DataFrame):
+    """Plot boundary lines with distinct styling."""
+    n_candles = len(candles_df)
+    
+    for _, line in boundary_levels.iterrows():
+        sr_type = line.get('sr_type', 0)
+        slope = line.get('slope', 0.0)
+        intercept = line.get('intercept', 0.0)
+        start_idx = line.get('start_idx', 0)
+        end_idx = line.get('end_idx', n_candles - 1)
+        r_squared = line.get('r_squared', 1.0)
+        num_points = line.get('num_points', 0)
+        touch_count = line.get('touch_count', 0)
+        
+        # Determine color and label
+        if sr_type == 0:  # Support boundary
+            color = 'blue'
+            label_prefix = 'Support Boundary'
+        else:  # Resistance boundary
+            color = 'orange'
+            label_prefix = 'Resistance Boundary'
+        
+        # Adjust alpha based on R² and number of points
+        alpha = 0.5 + (r_squared * 0.3)
+        alpha = min(0.9, alpha)
+        
+        # Determine line style based on whether it's horizontal or diagonal
+        is_horizontal = abs(slope) < 1e-10
+        
+        if is_horizontal:
+            # Horizontal boundary line
+            price = intercept
+            ax.axhline(y=price, color=color, linestyle='-', 
+                      linewidth=2.5, alpha=alpha,
+                      label=f"{label_prefix} (R²={r_squared:.2f}, pts={num_points})")
+            
+            # Add label
+            ax.text(n_candles * 0.02, price, f"{price:.2f}", 
+                   verticalalignment='center', fontsize=9,
+                   bbox=dict(boxstyle='round', facecolor=color, alpha=0.4))
+        else:
+            # Diagonal boundary line
+            # Calculate prices at start and end
+            x = np.array([start_idx, end_idx])
+            y = slope * x + intercept
+            
+            ax.plot(x, y, color=color, linestyle='-', 
+                   linewidth=2.5, alpha=alpha,
+                   label=f"{label_prefix} (R²={r_squared:.2f}, pts={num_points}, touches={touch_count})")
+            
+            # Add arrow to show direction
+            mid_idx = (start_idx + end_idx) / 2
+            mid_price = slope * mid_idx + intercept
+            # Determine arrow direction based on slope
+            arrow_length = (end_idx - start_idx) * 0.1
+            ax.annotate('', xy=(end_idx, slope * end_idx + intercept),
+                       xytext=(end_idx - arrow_length, slope * (end_idx - arrow_length) + intercept),
+                       arrowprops=dict(arrowstyle='->', color=color, lw=1.5, alpha=alpha))
+
+
 def plot_pattern_strength_distribution(
     patterns_df: pd.DataFrame,
     pattern_type: str = 'S/R Levels',

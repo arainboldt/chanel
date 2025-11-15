@@ -209,10 +209,178 @@ def detect_fair_value_gaps(analyzer, artifacts_dir):
     return fvgs
 
 
+def detect_boundary_levels(analyzer, artifacts_dir):
+    """Detect boundary levels"""
+    print("\n" + "="*60)
+    print("6. DETECTING BOUNDARY LEVELS")
+    print("="*60)
+    
+    try:
+        # Detect boundary levels
+        boundary_levels = analyzer.detect_boundary_levels(
+            timeframes=['5min', '15min'],
+            swing_window=10,
+            epsilon=0.0001,
+            min_points=2,
+            tolerance=0.003,
+            min_touches=2,
+            min_r_squared=0.7
+        )
+        
+        print(f"✅ Detected {len(boundary_levels)} boundary levels")
+        print(f"\n   Breakdown:")
+        print(f"   • Support boundaries: {len(boundary_levels[boundary_levels['sr_type'] == 0])}")
+        print(f"   • Resistance boundaries: {len(boundary_levels[boundary_levels['sr_type'] == 1])}")
+        
+        # Count horizontal vs diagonal
+        horizontal = sum(abs(boundary_levels['slope']) < 1e-10) if len(boundary_levels) > 0 else 0
+        diagonal = len(boundary_levels) - horizontal
+        print(f"   • Horizontal: {horizontal}")
+        print(f"   • Diagonal: {diagonal}")
+        
+        if len(boundary_levels) > 0:
+            print(f"\n   Top 5 Boundary Levels (by R²):")
+            # Sort by R² descending
+            top_boundaries = boundary_levels.nlargest(5, 'r_squared')
+            for idx, boundary in top_boundaries.iterrows():
+                sr_type = "Support" if boundary['sr_type'] == 0 else "Resistance"
+                line_type = "Horizontal" if abs(boundary['slope']) < 1e-10 else "Diagonal"
+                print(f"   • {sr_type:10} {line_type:10} | "
+                      f"R²={boundary['r_squared']:.3f} | "
+                      f"pts={boundary['num_points']:2} | "
+                      f"touches={boundary['touch_count']:2} | "
+                      f"TF={boundary['timeframe']}")
+        
+        # Save to CSV
+        output_path = artifacts_dir / 'boundary_levels.csv'
+        boundary_levels.to_csv(output_path, index=False)
+        print(f"\n✅ Saved results: {output_path.name}")
+        
+        return boundary_levels
+        
+    except Exception as e:
+        print(f"⚠️  Boundary level detection encountered an issue: {e}")
+        print("   Skipping boundary level detection and continuing with demo...")
+        # Return empty DataFrame
+        return pd.DataFrame(columns=[
+            'slope', 'intercept', 'start_idx', 'end_idx',
+            'start_price', 'end_price', 'swing_points',
+            'r_squared', 'sr_type', 'num_points',
+            'touch_count', 'timeframe'
+        ])
+
+
+def plot_boundary_lines(analyzer, artifacts_dir):
+    """Generate boundary level visualization plots"""
+    print("\n" + "="*60)
+    print("7. GENERATING BOUNDARY LEVEL VISUALIZATIONS")
+    print("="*60)
+    
+    from chanel.visualization.plots import plot_boundary_lines
+    
+    # Detect boundary levels for plotting
+    boundary_levels = analyzer.detect_boundary_levels(
+        timeframes=['5min', '15min'],
+        swing_window=10,
+        epsilon=0.0001,
+        min_points=2,
+        tolerance=0.003,
+        min_touches=2,
+        min_r_squared=0.7
+    )
+    
+    if len(boundary_levels) == 0:
+        print("   ⚠️  No boundary levels detected, skipping plot")
+        return
+    
+    # Get candles for 5min timeframe
+    candles_df = analyzer.to_dataframe('5min')
+    
+    # Filter boundary levels to 5min timeframe for this plot
+    boundary_5min = boundary_levels[boundary_levels['timeframe'] == '5min'] if len(boundary_levels) > 0 else pd.DataFrame()
+    
+    if len(boundary_5min) > 0:
+        # Limit lookback for better visualization
+        lookback = min(300, len(candles_df))
+        candles_plot = candles_df.tail(lookback)
+        
+        # Adjust indices for the lookback window
+        start_idx_adj = candles_plot.index[0]
+        boundary_5min_adj = boundary_5min.copy()
+        boundary_5min_adj['start_idx'] = boundary_5min_adj['start_idx'] - start_idx_adj
+        boundary_5min_adj['end_idx'] = boundary_5min_adj['end_idx'] - start_idx_adj
+        # Filter to only show boundaries that overlap with the plot range
+        boundary_5min_adj = boundary_5min_adj[
+            (boundary_5min_adj['end_idx'] >= 0) & 
+            (boundary_5min_adj['start_idx'] < len(candles_plot))
+        ]
+        
+        # Reset index for plotting
+        candles_plot = candles_plot.reset_index(drop=True)
+        boundary_5min_adj = boundary_5min_adj.reset_index(drop=True)
+        
+        print("   Creating 5min timeframe boundary levels visualization...")
+        fig = plot_boundary_lines(
+            candles_plot,
+            boundary_5min_adj,
+            figsize=(16, 10),
+            title="Boundary Levels (5min)",
+            show_volume=True
+        )
+        
+        output_path = artifacts_dir / 'boundary_levels_5min.png'
+        fig.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        
+        print(f"✅ Saved plot: {output_path.name}")
+        print("   Legend:")
+        print("   • Blue solid lines = Support Boundaries")
+        print("   • Orange solid lines = Resistance Boundaries")
+    
+    # Plot with 15min timeframe for comparison
+    candles_15min_df = analyzer.to_dataframe('15min')
+    boundary_15min = boundary_levels[boundary_levels['timeframe'] == '15min'] if len(boundary_levels) > 0 else pd.DataFrame()
+    
+    if len(boundary_15min) > 0:
+        # Limit lookback for better visualization
+        lookback = min(100, len(candles_15min_df))
+        candles_plot = candles_15min_df.tail(lookback)
+        
+        # Adjust indices for the lookback window
+        start_idx_adj = candles_plot.index[0]
+        boundary_15min_adj = boundary_15min.copy()
+        boundary_15min_adj['start_idx'] = boundary_15min_adj['start_idx'] - start_idx_adj
+        boundary_15min_adj['end_idx'] = boundary_15min_adj['end_idx'] - start_idx_adj
+        # Filter to only show boundaries that overlap with the plot range
+        boundary_15min_adj = boundary_15min_adj[
+            (boundary_15min_adj['end_idx'] >= 0) & 
+            (boundary_15min_adj['start_idx'] < len(candles_plot))
+        ]
+        
+        # Reset index for plotting
+        candles_plot = candles_plot.reset_index(drop=True)
+        boundary_15min_adj = boundary_15min_adj.reset_index(drop=True)
+        
+        print("\n   Creating 15min timeframe boundary levels visualization...")
+        fig = plot_boundary_lines(
+            candles_plot,
+            boundary_15min_adj,
+            figsize=(16, 10),
+            title="Boundary Levels (15min)",
+            show_volume=True
+        )
+        
+        output_path = artifacts_dir / 'boundary_levels_15min.png'
+        fig.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
+        
+        print(f"✅ Saved plot: {output_path.name}")
+
+
 def plot_patterns(analyzer, artifacts_dir):
     """Generate pattern visualization plots"""
     print("\n" + "="*60)
-    print("6. GENERATING PATTERN VISUALIZATIONS")
+    print("8. GENERATING PATTERN VISUALIZATIONS")
     print("="*60)
     
     # Plot with 5min timeframe
@@ -253,10 +421,10 @@ def plot_patterns(analyzer, artifacts_dir):
     print(f"✅ Saved plot: {output_path.name}")
 
 
-def save_summary_report(analyzer, sr_levels, fvgs, artifacts_dir):
+def save_summary_report(analyzer, sr_levels, fvgs, boundary_levels, artifacts_dir):
     """Save a text summary report"""
     print("\n" + "="*60)
-    print("7. SAVING SUMMARY REPORT")
+    print("9. SAVING SUMMARY REPORT")
     print("="*60)
     
     summary = analyzer.summarize()
@@ -291,13 +459,24 @@ Unfilled:          {len(fvgs[fvgs['filled'] == 0])}
 Partially Filled:  {len(fvgs[fvgs['filled'] == 1])}
 Fully Filled:      {len(fvgs[fvgs['filled'] == 2])}
 
+BOUNDARY LEVELS
+{'-'*60}
+Total Detected:    {len(boundary_levels)}
+Support Boundaries: {len(boundary_levels[boundary_levels['sr_type'] == 0]) if len(boundary_levels) > 0 else 0}
+Resistance Boundaries: {len(boundary_levels[boundary_levels['sr_type'] == 1]) if len(boundary_levels) > 0 else 0}
+Horizontal:        {sum(abs(boundary_levels['slope']) < 1e-10) if len(boundary_levels) > 0 else 0}
+Diagonal:          {len(boundary_levels) - sum(abs(boundary_levels['slope']) < 1e-10) if len(boundary_levels) > 0 else 0}
+
 OUTPUT FILES
 {'-'*60}
 • raw_price_data.png          - Raw price chart
 • patterns_5min.png           - Pattern visualization (5min)
 • patterns_15min.png          - Pattern visualization (15min)
+• boundary_levels_5min.png    - Boundary levels visualization (5min)
+• boundary_levels_15min.png   - Boundary levels visualization (15min)
 • support_resistance_levels.csv - S/R level details
 • fair_value_gaps.csv         - FVG details
+• boundary_levels.csv         - Boundary level details
 • summary_report.txt          - This report
 
 {'='*60}
@@ -332,12 +511,14 @@ def main():
     # Detect patterns
     sr_levels = detect_support_resistance(analyzer, artifacts_dir)
     fvgs = detect_fair_value_gaps(analyzer, artifacts_dir)
+    boundary_levels = detect_boundary_levels(analyzer, artifacts_dir)
     
     # Generate visualizations
+    plot_boundary_lines(analyzer, artifacts_dir)
     plot_patterns(analyzer, artifacts_dir)
     
     # Save summary
-    save_summary_report(analyzer, sr_levels, fvgs, artifacts_dir)
+    save_summary_report(analyzer, sr_levels, fvgs, boundary_levels, artifacts_dir)
     
     # Final message
     print("\n" + "="*60)
