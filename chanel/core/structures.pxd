@@ -69,6 +69,12 @@ cdef struct FVG:
     long fill_timestamp       # Timestamp when filled
     double fill_percentage    # Percentage of gap filled (0-100)
     
+    # Violation tracking
+    int violated              # 0=not violated, 1=violated
+    int violation_idx         # Index where violation occurred (-1 if not violated)
+    long violation_timestamp  # Timestamp when violated
+    double violation_percentage  # How deep the wick penetrated (0-100)
+    
     # Metrics
     double strength           # Calculated strength metric (0-1)
     double speed              # Magnitude per candle (magnitude / num_candles)

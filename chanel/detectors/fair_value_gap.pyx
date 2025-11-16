@@ -85,8 +85,9 @@ cdef class FairValueGapDetector(BaseDetector):
             return pd.DataFrame(columns=[
                 'start_idx', 'end_idx', 'gap_high', 'gap_low', 'direction',
                 'magnitude', 'volume_middle', 'timestamp', 'filled',
-                'fill_idx', 'fill_timestamp', 'fill_percentage', 'strength',
-                'speed', 'volume_ratio'
+                'fill_idx', 'fill_timestamp', 'fill_percentage', 'violated',
+                'violation_idx', 'violation_timestamp', 'violation_percentage',
+                'strength', 'speed', 'volume_ratio'
             ])
         
         return pd.DataFrame(gaps)
@@ -185,6 +186,10 @@ cdef class FairValueGapDetector(BaseDetector):
             'fill_idx': -1,
             'fill_timestamp': 0,
             'fill_percentage': 0.0,
+            'violated': 0,  # Not violated initially
+            'violation_idx': -1,
+            'violation_timestamp': 0,
+            'violation_percentage': 0.0,
             'strength': strength,
             'speed': magnitude / n_middle,
             'volume_ratio': self._calculate_volume_ratio(volume_middle, n_middle, end_idx)
@@ -257,6 +262,10 @@ cdef class FairValueGapDetector(BaseDetector):
             'fill_idx': -1,
             'fill_timestamp': 0,
             'fill_percentage': 0.0,
+            'violated': 0,  # Not violated initially
+            'violation_idx': -1,
+            'violation_timestamp': 0,
+            'violation_percentage': 0.0,
             'strength': strength,
             'speed': magnitude / n_middle,
             'volume_ratio': self._calculate_volume_ratio(volume_middle, n_middle, end_idx)
@@ -376,6 +385,7 @@ cdef class FairValueGapDetector(BaseDetector):
         Track which gaps have been filled by subsequent price action.
         
         A gap is filled when price returns to the gap zone.
+        A violation occurs when only the wick enters the gap but close doesn't cross through.
         """
         cdef int length = self.candles.length
         cdef double gap_mid
@@ -388,11 +398,15 @@ cdef class FairValueGapDetector(BaseDetector):
             gap_low = gap['gap_low']
             direction = gap['direction']
             
-            # Look forward from gap end to find fill
+            # Look forward from gap end to find fill and violations
             filled = False
             partial_filled = False
             fill_idx = -1
             fill_pct = 0.0
+            
+            violated = False
+            violation_idx = -1
+            violation_pct = 0.0
             
             gap_mid = (gap_high + gap_low) / 2.0
             high_penetration = 0.0
@@ -401,9 +415,20 @@ cdef class FairValueGapDetector(BaseDetector):
             for i in range(end_idx + 1, length):
                 candle_high = self.candles.get_high(i)
                 candle_low = self.candles.get_low(i)
+                candle_close = self.candles.get_close(i)
                 
                 if direction == 1:  # Bullish gap
-                    # Check if price came back down into gap
+                    # Check for violation: wick enters but close doesn't cross through
+                    if not violated:
+                        if candle_low < gap_high and candle_close >= gap_high:
+                            # Wick entered gap but close stayed at or above gap_high (didn't cross through)
+                            violated = True
+                            violation_idx = i
+                            # Calculate violation percentage: how deep the wick penetrated
+                            penetration = gap_high - candle_low
+                            violation_pct = (penetration / gap['magnitude']) * 100.0
+                    
+                    # Check if price came back down into gap (fill detection)
                     if candle_low <= gap_high:
                         if candle_low <= gap_low:
                             # Fully filled
@@ -422,7 +447,17 @@ cdef class FairValueGapDetector(BaseDetector):
                             fill_pct = max(fill_pct, (penetration / gap['magnitude']) * 100.0)
                 
                 else:  # Bearish gap (direction == -1)
-                    # Check if price came back up into gap
+                    # Check for violation: wick enters but close doesn't cross through
+                    if not violated:
+                        if candle_high > gap_low and candle_close <= gap_low:
+                            # Wick entered gap but close stayed at or below gap_low (didn't cross through)
+                            violated = True
+                            violation_idx = i
+                            # Calculate violation percentage: how deep the wick penetrated
+                            penetration = candle_high - gap_low
+                            violation_pct = (penetration / gap['magnitude']) * 100.0
+                    
+                    # Check if price came back up into gap (fill detection)
                     if candle_high >= gap_low:
                         if candle_high >= gap_high:
                             # Fully filled
@@ -453,6 +488,18 @@ cdef class FairValueGapDetector(BaseDetector):
             
             if fill_idx >= 0:
                 gap['fill_timestamp'] = int(self.candles.get_timestamp(fill_idx))
+            
+            # Update gap with violation information
+            if violated:
+                gap['violated'] = 1
+                gap['violation_idx'] = violation_idx
+                gap['violation_timestamp'] = int(self.candles.get_timestamp(violation_idx))
+                gap['violation_percentage'] = violation_pct
+            else:
+                gap['violated'] = 0
+                gap['violation_idx'] = -1
+                gap['violation_timestamp'] = 0
+                gap['violation_percentage'] = 0.0
         
         return gaps
 

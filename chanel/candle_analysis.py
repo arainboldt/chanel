@@ -196,10 +196,48 @@ class CandleAnalyzer:
                 levels_df = self._sr_cache[cache_key]
             else:
                 # Resample if needed
-                candles = self.resample(tf) if tf != self.source_timeframe else self.candles
-                
-                # Detect levels
-                levels_df = detect_support_resistance(candles, **params)
+                print(f"[DEBUG] Processing timeframe: {tf}")
+                try:
+                    candles = self.resample(tf) if tf != self.source_timeframe else self.candles
+                    print(f"[DEBUG] Resampled candles: type={type(candles)}, length={len(candles)}")
+                    
+                    # Validate candles before passing to Cython
+                    from chanel.debug_utils import validate_candle_array, with_timeout, timed_operation
+                    is_valid, error_msg = validate_candle_array(candles)
+                    if not is_valid:
+                        print(f"[ERROR] Invalid CandleArray for timeframe {tf}: {error_msg}")
+                        levels_df = pd.DataFrame()
+                    else:
+                        print(f"[DEBUG] Calling detect_support_resistance for {tf}...")
+                        print(f"[DEBUG] Processing {len(candles)} candles (this may take a while)...")
+                        
+                        # Detect levels with timeout protection and timing
+                        try:
+                            # Create a wrapped function with timeout
+                            def detect_with_timeout():
+                                return with_timeout(
+                                    detect_support_resistance,
+                                    120.0,  # timeout_seconds as positional
+                                    candles,
+                                    **params
+                                )
+                            
+                            levels_df, elapsed = timed_operation(
+                                f"detect_support_resistance({tf})",
+                                detect_with_timeout
+                            )
+                            print(f"[DEBUG] Detection complete for {tf}: {len(levels_df)} levels found in {elapsed:.2f}s")
+                        except Exception as e:
+                            if "timed out" in str(e).lower():
+                                print(f"[ERROR] Detection for {tf} timed out after 120 seconds")
+                            else:
+                                print(f"[ERROR] Detection failed for {tf}: {type(e).__name__}: {e}")
+                            levels_df = pd.DataFrame()
+                except Exception as e:
+                    print(f"[ERROR] Exception processing timeframe {tf}: {type(e).__name__}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    levels_df = pd.DataFrame()
                 
                 # Add timeframe column
                 if len(levels_df) > 0:
@@ -237,14 +275,18 @@ class CandleAnalyzer:
         **kwargs
     ) -> pd.DataFrame:
         """
-        Detect support/resistance using hierarchical multi-timeframe analysis.
+        Detect support/resistance using hierarchical leg-based multi-timeframe analysis.
         
-        This method uses the new hierarchical detection system that analyzes
-        timeframes in a tree structure, where each level analyzes sub-sections
-        of the previous level.
+        This method processes timeframes from highest (1hr) to lowest (1min), where
+        lower frequencies are processed in chunks based on legs/waves from higher frequencies.
+        A leg is a continuous boundary line segment. When boundary lines break or change
+        direction, it's a new leg.
+        
+        This approach minimizes memory and compute complexity by only processing
+        relevant segments of data at each timeframe level.
         
         Args:
-            timeframes: List of timeframes for hierarchy (default: from config)
+            timeframes: List of timeframes for hierarchy, ordered highest to lowest
             min_touches: Minimum number of touches required
             tolerance: Price tolerance for touches (as fraction)
             swing_window: Window size for swing point detection
@@ -255,37 +297,212 @@ class CandleAnalyzer:
         Returns:
             DataFrame of detected S/R levels
         """
-        from chanel.detectors.hierarchical_sr import detect_hierarchical_sr
-        from chanel.config import get_default_config
+        from chanel.detectors.support_resistance import detect_support_resistance
+        from chanel.detectors.boundary_lines import find_boundary_lines
+        from chanel.detectors.base import find_swing_points
+        from chanel.detectors.leg_detector import detect_legs_from_boundary_lines
+        from chanel.debug_utils import with_timeout, timed_operation, validate_candle_array
         from chanel.metrics.scoring import filter_by_strength
         
-        # Get configuration
-        config = get_default_config()
+        if timeframes is None or len(timeframes) == 0:
+            return pd.DataFrame()
         
-        # Use provided timeframes or config default
-        if timeframes is None:
-            timeframe_hierarchy = config.timeframe_hierarchy
-        else:
-            timeframe_hierarchy = timeframes
+        # Ensure timeframes are ordered from highest to lowest
+        timeframe_order = ['1hr', '4hr', '1h', '30min', '15min', '5min', '1min']
+        timeframes = sorted(timeframes, key=lambda x: timeframe_order.index(x) if x in timeframe_order else 999)
         
-        # Prepare parameters
-        params = {
-            'timeframe_hierarchy': timeframe_hierarchy,
-            'swing_window': swing_window,
-            'tolerance': tolerance,
-            'epsilon': kwargs.get('epsilon', config.epsilon),
-            'max_swing_points': kwargs.get('max_swing_points', config.max_swing_points),
-            'min_touches': min_touches,
-            'min_r_squared': kwargs.get('min_r_squared', config.min_r_squared),
-            'detect_diagonal': detect_diagonal,
-            **{k: v for k, v in kwargs.items() if k not in ['epsilon', 'max_swing_points', 'min_r_squared']}
-        }
+        print(f"[DEBUG] Hierarchical leg-based processing: {timeframes}")
         
-        # Perform hierarchical detection
-        hierarchical_analysis = detect_hierarchical_sr(self.candles, **params)
+        all_levels = []
+        legs_by_timeframe = {}  # Store legs for each timeframe
         
-        # Convert to DataFrame
-        result = hierarchical_analysis.to_dataframe()
+        # Process each timeframe from highest to lowest
+        for tf_idx, tf in enumerate(timeframes):
+            print(f"\n[DEBUG] Processing timeframe {tf} ({tf_idx + 1}/{len(timeframes)})...")
+            
+            # Get parent timeframe (one level higher)
+            parent_tf = timeframes[tf_idx - 1] if tf_idx > 0 else None
+            
+            if parent_tf is None:
+                # First timeframe: process entire dataset
+                print(f"[DEBUG] First timeframe {tf}: processing entire dataset")
+                candles = self.resample(tf) if tf != self.source_timeframe else self.candles
+                
+                is_valid, error_msg = validate_candle_array(candles)
+                if not is_valid:
+                    print(f"[ERROR] Invalid CandleArray for {tf}: {error_msg}")
+                    continue
+                
+                # Detect boundary lines to identify legs
+                print(f"[DEBUG] Detecting boundary lines for {tf}...")
+                swing_points = find_swing_points(candles, swing_window)
+                
+                if len(swing_points) >= 2:
+                    # Separate swing highs and lows
+                    swing_highs = [sp for sp in swing_points if sp['swing_type'] == 1]
+                    swing_lows = [sp for sp in swing_points if sp['swing_type'] == 0]
+                    
+                    boundary_lines = []
+                    if len(swing_highs) >= 2:
+                        resistance_lines = find_boundary_lines(swing_highs, epsilon=0.0001, min_points=2)
+                        boundary_lines.extend(resistance_lines)
+                    if len(swing_lows) >= 2:
+                        support_lines = find_boundary_lines(swing_lows, epsilon=0.0001, min_points=2)
+                        boundary_lines.extend(support_lines)
+                    
+                    if len(boundary_lines) > 0:
+                        # Convert to DataFrame for leg detection
+                        bl_df = pd.DataFrame(boundary_lines)
+                        legs = detect_legs_from_boundary_lines(bl_df, min_leg_length=10)
+                        legs_by_timeframe[tf] = legs
+                        print(f"[DEBUG] Detected {len(legs)} legs in {tf}")
+                
+                # Detect S/R levels for entire timeframe
+                # Temporarily disable diagonal detection to isolate the issue
+                print(f"[DEBUG] Preparing detection parameters for {tf}...")
+                params = {
+                    'min_touches': min_touches,
+                    'tolerance': tolerance,
+                    'swing_window': swing_window,
+                    'detect_diagonal': False,  # Temporarily disabled to isolate hang
+                    **kwargs
+                }
+                print(f"[DEBUG] Parameters: min_touches={min_touches}, tolerance={tolerance}, "
+                      f"swing_window={swing_window}, detect_diagonal=False")
+                
+                try:
+                    print(f"[DEBUG] About to call detect_support_resistance for {tf}...")
+                    print(f"[DEBUG] CandleArray length: {len(candles)}")
+                    
+                    # Create a wrapped function with timeout
+                    def detect_with_timeout():
+                        print(f"[DEBUG] Inside timeout wrapper, calling detect_support_resistance...")
+                        result = with_timeout(
+                            detect_support_resistance,
+                            30.0,  # Reduced timeout to 30 seconds for testing
+                            candles,
+                            **params
+                        )
+                        print(f"[DEBUG] detect_support_resistance returned, type: {type(result)}")
+                        return result
+                    
+                    print(f"[DEBUG] Starting timed_operation...")
+                    levels_df, elapsed = timed_operation(
+                        f"detect_support_resistance({tf})",
+                        detect_with_timeout
+                    )
+                    print(f"[DEBUG] timed_operation completed, got {len(levels_df)} levels")
+                    if len(levels_df) > 0:
+                        levels_df['timeframe'] = tf
+                        all_levels.append(levels_df)
+                    print(f"[DEBUG] Found {len(levels_df)} levels in {tf} in {elapsed:.2f}s")
+                except Exception as e:
+                    print(f"[ERROR] Failed to detect levels for {tf}: {e}")
+                    continue
+            else:
+                # Process only on legs from parent timeframe
+                parent_legs = legs_by_timeframe.get(parent_tf, [])
+                
+                if len(parent_legs) == 0:
+                    print(f"[DEBUG] No legs from parent {parent_tf}, skipping {tf}")
+                    continue
+                
+                print(f"[DEBUG] Processing {tf} on {len(parent_legs)} legs from {parent_tf}")
+                
+                # Get parent candles to map indices
+                parent_candles = self.resample(parent_tf) if parent_tf != self.source_timeframe else self.candles
+                current_candles = self.resample(tf) if tf != self.source_timeframe else self.candles
+                
+                # Process each leg
+                for leg_idx, leg in enumerate(parent_legs):
+                    print(f"[DEBUG] Processing leg {leg_idx + 1}/{len(parent_legs)}: "
+                          f"indices {leg['start_idx']}-{leg['end_idx']} ({leg['direction']})")
+                    
+                    # Map parent indices to current timeframe indices
+                    # Simple approach: use proportional mapping
+                    parent_length = len(parent_candles)
+                    current_length = len(current_candles)
+                    
+                    # Map parent indices to current timeframe
+                    start_ratio = leg['start_idx'] / parent_length if parent_length > 0 else 0
+                    end_ratio = leg['end_idx'] / parent_length if parent_length > 0 else 1
+                    
+                    current_start = int(start_ratio * current_length)
+                    current_end = int(end_ratio * current_length)
+                    current_end = min(current_end, current_length - 1)
+                    
+                    # Add padding (10% on each side)
+                    padding = max(5, int((current_end - current_start) * 0.1))
+                    current_start = max(0, current_start - padding)
+                    current_end = min(current_length - 1, current_end + padding)
+                    
+                    if current_end <= current_start:
+                        continue
+                    
+                    # Extract subset of candles for this leg
+                    # Note: We need to create a subset CandleArray
+                    # For now, we'll process the full timeframe but this is a limitation
+                    # TODO: Implement CandleArray slicing/subsetting
+                    print(f"[DEBUG] Leg range: {current_start}-{current_end} ({current_end - current_start + 1} candles)")
+                    
+                    # For now, process full timeframe but filter results to leg range
+                    # This is not optimal but works until we have CandleArray slicing
+                    params = {
+                        'min_touches': min_touches,
+                        'tolerance': tolerance,
+                        'swing_window': swing_window,
+                        'detect_diagonal': detect_diagonal,
+                        **kwargs
+                    }
+                    
+                    try:
+                        # Create a wrapped function with timeout
+                        def detect_with_timeout():
+                            return with_timeout(
+                                detect_support_resistance,
+                                120.0,  # timeout_seconds as positional
+                                current_candles,
+                                **params
+                            )
+                        
+                        levels_df, elapsed = timed_operation(
+                            f"detect_support_resistance({tf}, leg {leg_idx + 1})",
+                            detect_with_timeout
+                        )
+                        
+                        if len(levels_df) > 0:
+                            # Filter levels to leg range
+                            leg_levels = levels_df[
+                                (levels_df['start_idx'] >= current_start) &
+                                (levels_df['end_idx'] <= current_end)
+                            ].copy()
+                            
+                            if len(leg_levels) > 0:
+                                leg_levels['timeframe'] = tf
+                                leg_levels['parent_leg'] = leg_idx
+                                all_levels.append(leg_levels)
+                                print(f"[DEBUG] Found {len(leg_levels)} levels in leg {leg_idx + 1} in {elapsed:.2f}s")
+                    except Exception as e:
+                        print(f"[ERROR] Failed to detect levels for {tf} leg {leg_idx + 1}: {e}")
+                        continue
+                
+                # Detect legs for current timeframe for next iteration
+                if len(all_levels) > 0:
+                    # Get boundary lines from detected levels
+                    current_levels = pd.concat([df for df in all_levels if df['timeframe'].iloc[0] == tf], ignore_index=True)
+                    if len(current_levels) > 0 and 'slope' in current_levels.columns:
+                        # Filter to diagonal lines (boundary lines)
+                        boundary_levels = current_levels[abs(current_levels['slope']) > 1e-10].copy()
+                        if len(boundary_levels) > 0:
+                            legs = detect_legs_from_boundary_lines(boundary_levels, min_leg_length=10)
+                            legs_by_timeframe[tf] = legs
+                            print(f"[DEBUG] Detected {len(legs)} legs in {tf}")
+        
+        # Combine all levels
+        if not all_levels:
+            return pd.DataFrame()
+        
+        result = pd.concat(all_levels, ignore_index=True)
         
         # Filter by strength if requested
         if min_strength is not None and len(result) > 0:
@@ -442,6 +659,106 @@ class CandleAnalyzer:
                             line['touch_count'] = len(touches)
                             line['timeframe'] = tf
                             boundary_lines.append(line)
+                    
+                    # Extend boundary lines to the last candle
+                    last_candle_idx = len(candles) - 1
+                    
+                    # Check if any boundary already extends to last candle (before extending)
+                    has_boundary_at_end = len(boundary_lines) > 0 and any(
+                        line['end_idx'] >= last_candle_idx for line in boundary_lines
+                    )
+                    
+                    # Extend all boundary lines to last candle
+                    for line in boundary_lines:
+                        # Extend end_idx to last candle
+                        original_end_idx = line['end_idx']
+                        line['end_idx'] = last_candle_idx
+                        # Update end_price using line equation: price = slope * idx + intercept
+                        line['end_price'] = line['slope'] * last_candle_idx + line['intercept']
+                    
+                    # Ensure at least one boundary extends to the last timestamp
+                    # If no boundaries exist or none extended to last candle before, create synthetic ones
+                    if len(boundary_lines) == 0 or not has_boundary_at_end:
+                        # Get last candle prices
+                        last_high = candles.get_high(last_candle_idx)
+                        last_low = candles.get_low(last_candle_idx)
+                        last_close = candles.get_close(last_candle_idx)
+                        
+                        # Find the most recent swing points to determine trend
+                        if len(swing_points) >= 2:
+                            # Get last two swing points
+                            last_swing = swing_points[-1]
+                            prev_swing = swing_points[-2]
+                            
+                            # Create boundary at last candle based on swing type
+                            if last_swing['swing_type'] == 1:  # Last swing was a high
+                                # Create resistance boundary at last high
+                                synthetic_line = {
+                                    'slope': 0.0,  # Horizontal
+                                    'intercept': last_high,
+                                    'start_idx': last_swing['index'],
+                                    'end_idx': last_candle_idx,
+                                    'start_price': last_swing['price'],
+                                    'end_price': last_high,
+                                    'swing_points': [last_swing],
+                                    'r_squared': 1.0,
+                                    'sr_type': 1,  # Resistance
+                                    'num_points': 1,
+                                    'touch_count': 1,
+                                    'timeframe': tf
+                                }
+                                boundary_lines.append(synthetic_line)
+                            
+                            if last_swing['swing_type'] == 0:  # Last swing was a low
+                                # Create support boundary at last low
+                                synthetic_line = {
+                                    'slope': 0.0,  # Horizontal
+                                    'intercept': last_low,
+                                    'start_idx': last_swing['index'],
+                                    'end_idx': last_candle_idx,
+                                    'start_price': last_swing['price'],
+                                    'end_price': last_low,
+                                    'swing_points': [last_swing],
+                                    'r_squared': 1.0,
+                                    'sr_type': 0,  # Support
+                                    'num_points': 1,
+                                    'touch_count': 1,
+                                    'timeframe': tf
+                                }
+                                boundary_lines.append(synthetic_line)
+                        else:
+                            # No swing points - create simple horizontal boundaries
+                            # Create support at last low
+                            synthetic_support = {
+                                'slope': 0.0,
+                                'intercept': last_low,
+                                'start_idx': max(0, last_candle_idx - 10),
+                                'end_idx': last_candle_idx,
+                                'start_price': last_low,
+                                'end_price': last_low,
+                                'swing_points': [],
+                                'r_squared': 1.0,
+                                'sr_type': 0,  # Support
+                                'num_points': 1,
+                                'touch_count': 1,
+                                'timeframe': tf
+                            }
+                            # Create resistance at last high
+                            synthetic_resistance = {
+                                'slope': 0.0,
+                                'intercept': last_high,
+                                'start_idx': max(0, last_candle_idx - 10),
+                                'end_idx': last_candle_idx,
+                                'start_price': last_high,
+                                'end_price': last_high,
+                                'swing_points': [],
+                                'r_squared': 1.0,
+                                'sr_type': 1,  # Resistance
+                                'num_points': 1,
+                                'touch_count': 1,
+                                'timeframe': tf
+                            }
+                            boundary_lines.extend([synthetic_support, synthetic_resistance])
                     
                     # Convert to DataFrame
                     if len(boundary_lines) > 0:

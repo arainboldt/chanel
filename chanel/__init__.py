@@ -8,7 +8,7 @@ in stock candles, including support/resistance levels and fair-value gaps.
 __version__ = "0.1.0"
 
 # Main API
-from chanel.api import CandleAnalyzer
+from chanel.candle_analysis import CandleAnalyzer
 
 # Data generation utilities
 from chanel.data_generator import (

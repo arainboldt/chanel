@@ -17,6 +17,37 @@ import os
 import sys
 from pathlib import Path
 import warnings
+import signal
+import traceback
+import faulthandler
+
+# Enable faulthandler to get stack traces on segfaults
+# This will dump the Python stack trace to stderr on crash
+faulthandler.enable()
+
+# Register signal handlers for better crash diagnostics
+def signal_handler(signum, frame):
+    """Handle signals and print diagnostic information"""
+    signal_names = {
+        signal.SIGSEGV: 'SIGSEGV (Segmentation Fault)',
+        signal.SIGABRT: 'SIGABRT (Abort)',
+        signal.SIGFPE: 'SIGFPE (Floating Point Exception)',
+        signal.SIGILL: 'SIGILL (Illegal Instruction)',
+        signal.SIGBUS: 'SIGBUS (Bus Error)',
+    }
+    sig_name = signal_names.get(signum, f'Signal {signum}')
+    print(f"\n{'='*60}", file=sys.stderr)
+    print(f"CRASH DETECTED: {sig_name}", file=sys.stderr)
+    print(f"{'='*60}", file=sys.stderr)
+    print("Current stack trace:", file=sys.stderr)
+    traceback.print_stack(frame, file=sys.stderr)
+    print(f"{'='*60}\n", file=sys.stderr)
+    sys.exit(1)
+
+# Register handlers for common crash signals
+signal.signal(signal.SIGSEGV, signal_handler)
+signal.signal(signal.SIGABRT, signal_handler)
+signal.signal(signal.SIGFPE, signal_handler)
 
 import pandas as pd
 import numpy as np
@@ -49,7 +80,7 @@ def generate_data():
     
     # Generate data with multiple market regimes
     df = generate_multi_regime_data(
-        n_candles=390,
+        n_candles=3900,
         start_price=100.0,
         seed=42
     )
@@ -122,24 +153,55 @@ def detect_support_resistance(analyzer, artifacts_dir):
     print("="*60)
     
     try:
-        # Use new hierarchical detection system
-        print("   Using hierarchical multi-timeframe analysis...")
-        sr_levels = analyzer.detect_support_resistance(
-            hierarchical=True,  # Enable hierarchical detection
-            timeframes=['1hr', '15min', '5min', '1min'],  # Full hierarchy
-            min_touches=3,
-            tolerance=0.003,
-            detect_diagonal=True,  # Now enabled with optimized algorithm
-            min_strength=0.3,
-            max_swing_points=50  # Limit to last 50 swing points
-        )
+        # Process from highest frequency (1hr) to lowest (1min)
+        # Lower frequencies will be processed in chunks based on legs/waves from higher frequencies
+        print("   Using hierarchical leg-based multi-timeframe analysis...")
+        print("   Processing order: 1hr → 15min → 5min → 1min")
+        print("   [DEBUG] About to call detect_support_resistance...")
+        print(f"   [DEBUG] Analyzer type: {type(analyzer)}")
+        print(f"   [DEBUG] Analyzer candles length: {len(analyzer.candles)}")
+        
+        try:
+            print("   [DEBUG] Calling detect_support_resistance method...")
+            # Start with just 1hr to test
+            sr_levels = analyzer.detect_support_resistance(
+                hierarchical=True,  # Enable hierarchical leg-based processing
+                timeframes=['1hr'],  # Start with just 1hr to test
+                min_touches=2,  # Lower threshold for initial testing
+                tolerance=0.003,
+                detect_diagonal=False,  # Temporarily disabled to isolate hang
+                min_strength=0.3
+            )
+            print(f"   [DEBUG] detect_support_resistance returned: {type(sr_levels)}, length: {len(sr_levels) if hasattr(sr_levels, '__len__') else 'N/A'}")
+        except SystemExit:
+            raise
+        except BaseException as e:
+            print(f"   [ERROR] Exception in detect_support_resistance call:")
+            print(f"   [ERROR] Type: {type(e).__name__}")
+            print(f"   [ERROR] Message: {e}")
+            traceback.print_exc()
+            raise
         
         print(f"✅ Detected {len(sr_levels)} S/R levels")
-        print(f"\n   Breakdown:")
-        print(f"   • Horizontal: {len(sr_levels[sr_levels['level_type'] == 0])}")
-        print(f"   • Diagonal (trendlines): {len(sr_levels[sr_levels['level_type'] == 1])}")
-        print(f"   • Support: {len(sr_levels[sr_levels['sr_type'] == 0])}")
-        print(f"   • Resistance: {len(sr_levels[sr_levels['sr_type'] == 1])}")
+        
+        if len(sr_levels) == 0:
+            print("   No levels detected")
+        else:
+            print(f"\n   Breakdown:")
+            # Check if columns exist before accessing
+            if 'level_type' in sr_levels.columns:
+                horizontal = len(sr_levels[sr_levels['level_type'] == 0]) if len(sr_levels) > 0 else 0
+                diagonal = len(sr_levels[sr_levels['level_type'] == 1]) if len(sr_levels) > 0 else 0
+                print(f"   • Horizontal: {horizontal}")
+                print(f"   • Diagonal (trendlines): {diagonal}")
+            else:
+                print(f"   • Columns available: {list(sr_levels.columns)}")
+            
+            if 'sr_type' in sr_levels.columns:
+                support = len(sr_levels[sr_levels['sr_type'] == 0]) if len(sr_levels) > 0 else 0
+                resistance = len(sr_levels[sr_levels['sr_type'] == 1]) if len(sr_levels) > 0 else 0
+                print(f"   • Support: {support}")
+                print(f"   • Resistance: {resistance}")
         
         if len(sr_levels) > 0:
             print(f"\n   Top 5 Strongest Levels:")
@@ -159,7 +221,10 @@ def detect_support_resistance(analyzer, artifacts_dir):
         return sr_levels
         
     except Exception as e:
+        import traceback
         print(f"⚠️  S/R detection encountered an issue: {e}")
+        print("   Full traceback:")
+        traceback.print_exc()
         print("   Skipping S/R detection and continuing with demo...")
         # Return empty DataFrame
         return pd.DataFrame(columns=[
@@ -218,7 +283,7 @@ def detect_boundary_levels(analyzer, artifacts_dir):
     try:
         # Detect boundary levels
         boundary_levels = analyzer.detect_boundary_levels(
-            timeframes=['5min', '15min'],
+            timeframes=['1min', '5min', '15min'],
             swing_window=10,
             epsilon=0.0001,
             min_points=2,
@@ -280,7 +345,7 @@ def plot_boundary_lines(analyzer, artifacts_dir):
     
     # Detect boundary levels for plotting
     boundary_levels = analyzer.detect_boundary_levels(
-        timeframes=['5min', '15min'],
+        timeframes=['1min', '5min', '15min'],
         swing_window=10,
         epsilon=0.0001,
         min_points=2,
@@ -421,6 +486,47 @@ def plot_patterns(analyzer, artifacts_dir):
     print(f"✅ Saved plot: {output_path.name}")
 
 
+def export_features(analyzer, artifacts_dir):
+    """Export features for 1min data"""
+    print("\n" + "="*60)
+    print("10. EXPORTING FEATURES (1min)")
+    print("="*60)
+    
+    try:
+        # Extract features for 1min frequency
+        features = analyzer.extract_features(
+            frequency='1min',
+            min_touches=3,
+            tolerance=0.003,
+            detect_diagonal=True,
+            min_strength=0.3,
+            swing_window=10,
+            epsilon=0.0001,
+            min_points=2,
+            min_r_squared=0.7,
+            min_gap_size=0.002,
+            track_fills=True
+        )
+        
+        print(f"✅ Extracted features for {len(features)} timesteps")
+        print(f"   Feature columns: {len(features.columns)}")
+        print(f"   Columns: {', '.join(features.columns[:10].tolist())}...")
+        
+        # Save to CSV
+        output_path = artifacts_dir / 'features_1min.csv'
+        features.to_csv(output_path, index=False)
+        print(f"\n✅ Saved features: {output_path.name}")
+        
+        return features
+        
+    except Exception as e:
+        print(f"⚠️  Feature extraction encountered an issue: {e}")
+        print("   Skipping feature export and continuing with demo...")
+        import traceback
+        traceback.print_exc()
+        return pd.DataFrame()
+
+
 def save_summary_report(analyzer, sr_levels, fvgs, boundary_levels, artifacts_dir):
     """Save a text summary report"""
     print("\n" + "="*60)
@@ -477,6 +583,7 @@ OUTPUT FILES
 • support_resistance_levels.csv - S/R level details
 • fair_value_gaps.csv         - FVG details
 • boundary_levels.csv         - Boundary level details
+• features_1min.csv           - Extracted features for 1min data
 • summary_report.txt          - This report
 
 {'='*60}
@@ -516,6 +623,9 @@ def main():
     # Generate visualizations
     plot_boundary_lines(analyzer, artifacts_dir)
     plot_patterns(analyzer, artifacts_dir)
+    
+    # Export features
+    features = export_features(analyzer, artifacts_dir)
     
     # Save summary
     save_summary_report(analyzer, sr_levels, fvgs, boundary_levels, artifacts_dir)

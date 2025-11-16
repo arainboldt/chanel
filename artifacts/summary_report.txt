@@ -21,20 +21,31 @@ Resistance:        0
 
 FAIR VALUE GAPS
 ------------------------------------------------------------
-Total Detected:    8
-Bullish:           3
+Total Detected:    9
+Bullish:           4
 Bearish:           5
-Unfilled:          0
-Partially Filled:  1
+Unfilled:          2
+Partially Filled:  0
 Fully Filled:      7
+
+BOUNDARY LEVELS
+------------------------------------------------------------
+Total Detected:    3
+Support Boundaries: 2
+Resistance Boundaries: 1
+Horizontal:        0
+Diagonal:          3
 
 OUTPUT FILES
 ------------------------------------------------------------
 • raw_price_data.png          - Raw price chart
 • patterns_5min.png           - Pattern visualization (5min)
 • patterns_15min.png          - Pattern visualization (15min)
+• boundary_levels_5min.png    - Boundary levels visualization (5min)
+• boundary_levels_15min.png   - Boundary levels visualization (15min)
 • support_resistance_levels.csv - S/R level details
 • fair_value_gaps.csv         - FVG details
+• boundary_levels.csv         - Boundary level details
 • summary_report.txt          - This report
 
 ============================================================

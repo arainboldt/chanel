@@ -15,6 +15,7 @@ cimport numpy as cnp
 from libc.math cimport fabs
 
 from chanel.core.utils cimport linear_regression, calculate_r_squared
+from chanel.core.candles cimport CandleArray
 from chanel.detectors.base cimport candle_touches_diagonal_level
 
 cnp.import_array()
@@ -154,10 +155,11 @@ cdef dict _create_boundary_line(list swing_points):
     cdef double r_squared = calculate_r_squared(indices, prices, slope, intercept)
     
     # Get start and end points
-    cdef int start_idx = swing_points[0]['index']
-    cdef int end_idx = swing_points[-1]['index']
+    cdef int n_points = len(swing_points)
+    cdef int start_idx = int(swing_points[0]['index'])
+    cdef int end_idx = int(swing_points[n_points - 1]['index'])
     cdef double start_price = swing_points[0]['price']
-    cdef double end_price = swing_points[-1]['price']
+    cdef double end_price = swing_points[n_points - 1]['price']
     
     # Determine sr_type from swing_type (all points should have same type)
     cdef int sr_type = swing_points[0]['swing_type']
@@ -177,7 +179,7 @@ cdef dict _create_boundary_line(list swing_points):
 
 
 cpdef list find_touches_for_boundary_line(
-    object candles,
+    CandleArray candles,
     double slope,
     double intercept,
     int start_idx,

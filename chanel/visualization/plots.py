@@ -395,8 +395,10 @@ def _plot_boundary_lines(ax, candles_df: pd.DataFrame, boundary_levels: pd.DataF
                    bbox=dict(boxstyle='round', facecolor=color, alpha=0.4))
         else:
             # Diagonal boundary line
+            # Ensure line extends to last candle if end_idx is beyond current data
+            plot_end_idx = min(end_idx, n_candles - 1)
             # Calculate prices at start and end
-            x = np.array([start_idx, end_idx])
+            x = np.array([start_idx, plot_end_idx])
             y = slope * x + intercept
             
             ax.plot(x, y, color=color, linestyle='-', 
@@ -404,12 +406,12 @@ def _plot_boundary_lines(ax, candles_df: pd.DataFrame, boundary_levels: pd.DataF
                    label=f"{label_prefix} (R²={r_squared:.2f}, pts={num_points}, touches={touch_count})")
             
             # Add arrow to show direction
-            mid_idx = (start_idx + end_idx) / 2
+            mid_idx = (start_idx + plot_end_idx) / 2
             mid_price = slope * mid_idx + intercept
             # Determine arrow direction based on slope
-            arrow_length = (end_idx - start_idx) * 0.1
-            ax.annotate('', xy=(end_idx, slope * end_idx + intercept),
-                       xytext=(end_idx - arrow_length, slope * (end_idx - arrow_length) + intercept),
+            arrow_length = (plot_end_idx - start_idx) * 0.1
+            ax.annotate('', xy=(plot_end_idx, slope * plot_end_idx + intercept),
+                       xytext=(plot_end_idx - arrow_length, slope * (plot_end_idx - arrow_length) + intercept),
                        arrowprops=dict(arrowstyle='->', color=color, lw=1.5, alpha=alpha))
 
 

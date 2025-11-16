@@ -77,7 +77,7 @@ chanel/
 ├── visualization/     # Plotting utilities
 │   └── plots.py       # Matplotlib-based visualizations
 │
-└── api.py            # High-level CandleAnalyzer API
+└── candle_analysis.py  # High-level CandleAnalyzer API
 ```
 
 ### Key Design Decisions
